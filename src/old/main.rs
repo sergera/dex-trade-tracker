@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 
-use ethabi::{Contract, Token, Param};
+use ethabi::{Contract, Token, Param, ParamType};
 use ethabi::ethereum_types::{U256};
 use serde_json;
 use serde_json::Value;
@@ -14,7 +14,7 @@ use web3::types::{BlockNumber, FilterBuilder};
 use web3::types::{Transaction, TransactionReceipt, TransactionId};
 use web3::types::{Address, Bytes, H256, H160};
 
-const V1_UNISWAP_FACTORY: &str = "0xc0a47dFe034B400B47bDaD5FecDa2621de6c4d95";
+// Trying to integrate with Uniswap Universal Router
 
 #[tokio::main]
 async fn main() {
@@ -33,7 +33,7 @@ async fn main() {
 
 	let config_str = fs::read_to_string("./config/config.json").expect("Error: Failed to read config file");
 	let config: Value = serde_json::from_str(&config_str).expect("Error: Failed to parse JSON");
-	let rpc_provider_url = config["rpc-provider-url"].as_str().expect("Error: Failed to get rpc-provider-url");
+	let rpc_provider_url = config["eth-rpc-provider-url"].as_str().expect("Error: Failed to get rpc-provider-url");
 
 	let transport = web3::transports::Http::new(rpc_provider_url).unwrap();
 	let web3 = web3::Web3::new(transport);
@@ -81,11 +81,14 @@ async fn main() {
 
 	let mut abi_paths: HashMap<&str, &str> = HashMap::new();
 	abi_paths.insert("uniswap_v1", "./abi/eth/uniswap_v1/exchange.json");
+	abi_paths.insert("uniswap_router", "./abi/eth/uniswap/router.json");
 
 	let mut tokens: HashMap<&str, &str> = HashMap::new();
 	tokens.insert("usdt", "0xdAC17F958D2ee523a2206206994597C13D831ec7");
 	tokens.insert("usdc", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 	tokens.insert("busd", "0x4Fabb145d64652a948d72533023f6E7A623C7C53");
+	tokens.insert("weth", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
+	tokens.insert("wbnb", "0x418D75f65a02b3D53B2418FB8E1fe493759c7605");
 	tokens.insert("bnb", "0xB8c77482e45F1F44dE1745F52C74426C631bDD52");
 	tokens.insert("matic", "0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0");
 	tokens.insert("shib", "0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE");
@@ -98,20 +101,76 @@ async fn main() {
 	uniswap_v1_dexes.insert("matic", "0x9a7A75E66B325a3BD46973B2b57c9b8d9D26a621");
 	uniswap_v1_dexes.insert("shib", "0x5D9b6020EeF51fCB09390Bb4E07591f73c805065");
 
+	let contract_addr = successful_tx.to.unwrap();
+
 	let mut tk: Option<&str> = None;
 	let mut dex_addr: Option<&str> = None;
-
 	for (token, address) in &uniswap_v1_dexes {
-		if let Some(addr) = successful_tx.to {
-			if addr == address.parse().unwrap() {
-				println!("Using uniswap v1");
-				println!("DEX of token: {}", token);
-				tk = Some(token);
-				dex_addr = Some(address);
-				uniswap_v1(successful_tx, successful_receipt, tokens, uniswap_v1_dexes, abi_paths.get("uniswap_v1").unwrap()).await;
-				break;
+		if contract_addr == address.parse().unwrap() {
+			println!("Using uniswap v1");
+			println!("DEX of token: {}", token);
+			tk = Some(token);
+			dex_addr = Some(address);
+			uniswap_v1(successful_tx.clone(), successful_receipt, tokens, uniswap_v1_dexes, abi_paths.get("uniswap_v1").unwrap()).await;
+			break;
+		}
+	}
+
+	let uniswap_universal_router = "0xEf1c6E67703c7BD7107eed8303Fbe6EC2554BF6B";
+	
+	if contract_addr == uniswap_universal_router.parse().unwrap() {
+		println!("Using uniswap");
+		// Read and parse the contract ABI
+		let contract_abi = std::fs::read_to_string(abi_paths.get("uniswap_router").unwrap()).expect("Failed to read contract ABI");
+		let contract = ethabi::Contract::load(contract_abi.as_bytes()).expect("Failed to parse contract ABI");
+
+		// Extract and decode the input data from the transaction
+		let input_data = successful_tx.input.0.as_slice();
+		let function = contract.functions()
+		.find(|function| function.short_signature() == input_data[..4])
+		.expect("Failed to find called function in contract ABI");
+		let params = function.decode_input(&input_data[4..]).expect("Failed to decode input data");
+
+		println!("Called function: {}", function.name);
+		let mut commands: Vec<u8> = Vec::new();
+		let mut inputs: Vec<Vec<u8>> = Vec::new();
+    for (param, value) in function.inputs.iter().zip(params) {
+			println!("{}: {:?}", param.name, value);
+			if param.name == "commands" {
+				for byte in value.into_bytes().unwrap() {
+					commands.push(byte);
+				}
+			} else if param.name == "inputs" {
+				for bytes in value.into_array().unwrap() {
+					inputs.push(bytes.into_bytes().unwrap());
+				}
 			}
-		} 
+		}
+
+		println!("commands: {:?}", commands);
+		println!("inputs: {:?}", inputs);
+    let types = vec![
+        ParamType::Address,
+        ParamType::Uint(256),
+        ParamType::Uint(256),
+        ParamType::Array(Box::new(ParamType::Address)),
+        ParamType::Bool,
+    ];
+    let tokens = ethabi::decode(&types, &inputs[0]).unwrap();
+		let address: String = format!("0x{}", hex::encode(tokens[0].clone().into_address().unwrap().as_bytes()));
+    let uint256_1: U256 = tokens[1].clone().into_uint().unwrap();
+    let uint256_2: U256 = tokens[2].clone().into_uint().unwrap();
+    let addresses: Vec<String> = tokens[3].clone().into_array().unwrap()
+        .into_iter()
+        .map(|token| format!("0x{}", hex::encode(token.into_address().unwrap().as_bytes())))
+        .collect();
+    let boolean: bool = tokens[4].clone().into_bool().unwrap();
+
+		println!("recipient: {}", address);
+		println!("exact out: {}", uint256_1);
+		println!("max in: {}", uint256_2);
+		println!("token path: {:?}", addresses);
+		println!("should input tokens come from msg.sender: {:?}", boolean);
 	}
 
 	if tk.is_none() && dex_addr.is_none() {

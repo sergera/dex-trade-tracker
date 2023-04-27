@@ -1,3 +1,4 @@
 {
-  "rpc-provider-url": ""
+  "eth-rpc-provider-url": "",
+	"bsc-rpc-provider-url": ""
 }
